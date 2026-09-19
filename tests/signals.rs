@@ -26,11 +26,11 @@ fn write_config(path: &Path, storage: &Path, interval: &str) {
         format!(
             r#"version: 1
 storage_dir: {}
-sync_interval: {interval}
 run_on_start: false
 servers:
   - label: test
     url: https://example.invalid/api/
+    sync_interval: {interval}
 "#,
             storage.display()
         ),
@@ -77,7 +77,7 @@ fn sighup_reload_is_transactional_and_sigterm_is_graceful() {
         .spawn()
         .unwrap();
     let mut daemon = Daemon(child);
-    let state = storage.join(".state.json");
+    let state = storage.join(".status.json");
     wait_for_generation(&state, 1);
 
     write_config(&config, &storage, "2h");
@@ -117,7 +117,6 @@ fn occupied_metrics_address_fails_startup() {
         format!(
             r#"version: 1
 storage_dir: {}
-sync_interval: 1h
 run_on_start: false
 metrics:
   enabled: true
@@ -125,6 +124,7 @@ metrics:
 servers:
   - label: test
     url: https://example.invalid/api/
+    sync_interval: 1h
 "#,
             storage.display()
         ),
@@ -137,4 +137,44 @@ servers:
         .status()
         .unwrap();
     assert!(!status.success());
+}
+
+#[test]
+fn process_lock_rejects_overlap_and_is_reusable_after_exit() {
+    let temp = TempDir::new().unwrap();
+    let storage = temp.path().join("storage");
+    let config = temp.path().join("config.yaml");
+    write_config(&config, &storage, "1h");
+
+    let first = Command::new(env!("CARGO_BIN_EXE_galaxync"))
+        .args(["--config", config.to_str().unwrap()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut first = Daemon(first);
+    wait_for_generation(&storage.join(".status.json"), 1);
+
+    let overlapping = Command::new(env!("CARGO_BIN_EXE_galaxync"))
+        .args(["--config", config.to_str().unwrap()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(!overlapping.success());
+
+    signal(first.0.id(), "-TERM");
+    assert!(first.0.wait().unwrap().success());
+
+    let restarted = Command::new(env!("CARGO_BIN_EXE_galaxync"))
+        .args(["--config", config.to_str().unwrap()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut restarted = Daemon(restarted);
+    thread::sleep(Duration::from_millis(100));
+    assert!(restarted.0.try_wait().unwrap().is_none());
+    signal(restarted.0.id(), "-TERM");
+    assert!(restarted.0.wait().unwrap().success());
 }

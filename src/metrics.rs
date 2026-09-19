@@ -178,6 +178,7 @@ struct DisabledLabels {
 pub struct Metrics {
     registry: Arc<RwLock<Registry>>,
     ready: Arc<AtomicBool>,
+    persistence_failures: Arc<RwLock<HashSet<String>>>,
     configured_servers: Arc<RwLock<HashSet<String>>>,
     server_status: Family<StatusLabels, Gauge>,
     server_enabled: Family<ServerLabels, Gauge>,
@@ -375,6 +376,7 @@ impl Metrics {
         Self {
             registry: Arc::new(RwLock::new(registry)),
             ready: Arc::new(AtomicBool::new(false)),
+            persistence_failures: Arc::new(RwLock::new(HashSet::new())),
             configured_servers: Arc::new(RwLock::new(HashSet::new())),
             server_status,
             server_enabled,
@@ -415,6 +417,23 @@ impl Metrics {
     }
     pub fn is_ready(&self) -> bool {
         self.ready.load(Ordering::Acquire)
+            && self
+                .persistence_failures
+                .read()
+                .expect("persistence health lock poisoned")
+                .is_empty()
+    }
+    pub fn set_persistence_health(&self, resource: impl Into<String>, healthy: bool) {
+        let resource = resource.into();
+        let mut failures = self
+            .persistence_failures
+            .write()
+            .expect("persistence health lock poisoned");
+        if healthy {
+            failures.remove(&resource);
+        } else {
+            failures.insert(resource);
+        }
     }
     pub fn set_config_generation(&self, generation: u64) {
         self.config_generation.set(generation as i64);
@@ -484,12 +503,15 @@ impl Metrics {
                 source: source.label(),
             })
             .set(i64::from(disabled));
-        self.server_enabled
-            .get_or_create(&Self::server(server))
-            .set(i64::from(!disabled));
         if disabled {
             self.set_status(server, ServerStatus::Disabled);
         }
+    }
+
+    pub fn set_enabled(&self, server: &str, enabled: bool) {
+        self.server_enabled
+            .get_or_create(&Self::server(server))
+            .set(i64::from(enabled));
     }
 
     pub fn set_status(&self, server: &str, status: ServerStatus) {
@@ -757,5 +779,34 @@ mod tests {
                 .unwrap()
                 .contains("galaxync_server_status{server=\"one\",status=\"never_synced\"} 1")
         );
+    }
+
+    #[test]
+    fn marker_disable_is_reflected_after_marker_removal() {
+        let metrics = Metrics::new();
+        metrics.configure_server("one", true, Duration::from_secs(60), 1);
+        metrics.set_disabled("one", DisableSource::Marker, true);
+        metrics.set_enabled("one", false);
+        metrics.set_disabled("one", DisableSource::Marker, false);
+        metrics.set_enabled("one", true);
+
+        let text = metrics.encode().unwrap();
+        assert!(text.contains("galaxync_server_enabled{server=\"one\"} 1"));
+        assert!(text.contains("galaxync_server_disabled{server=\"one\",source=\"marker\"} 0"));
+    }
+
+    #[test]
+    fn readiness_requires_all_persistence_resources_to_recover() {
+        let metrics = Metrics::new();
+        metrics.set_ready(true);
+        metrics.set_persistence_health("global", false);
+        metrics.set_persistence_health("server:a", false);
+        assert!(!metrics.is_ready());
+        metrics.set_persistence_health("global", true);
+        assert!(!metrics.is_ready());
+        metrics.set_persistence_health("server:a", true);
+        assert!(metrics.is_ready());
+        metrics.set_ready(false);
+        assert!(!metrics.is_ready());
     }
 }

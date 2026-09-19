@@ -26,12 +26,12 @@ fn validates_yaml_configuration_via_cli() {
         r#"
 version: 1
 storage_dir: /var/lib/galaxync-test
-sync_interval: 15m
 metrics:
   enabled: false
 servers:
   - label: community
     url: https://galaxy.ansible.com/api/
+    sync_interval: 15m
     concurrency: 8
     namespaces:
       - name: community
@@ -65,11 +65,11 @@ fn validates_toml_configuration_and_expands_environment() {
         r#"
 version = 1
 storage_dir = "${GALAXYNC_TEST_STORAGE}"
-sync_interval = "1h"
 
 [[servers]]
 label = "internal"
 url = "https://galaxy.example.test/api/"
+sync_interval = "1h"
 enabled = false
 
 [servers.headers]
@@ -107,10 +107,10 @@ fn rejects_unknown_fields_via_cli() {
         r#"
 version: 1
 storage_dir: /var/lib/galaxync-test
-sync_interval: 5m
 servers:
   - label: community
     url: https://galaxy.ansible.com/api/
+    sync_interval: 5m
     concurency: 4
 "#,
     );
@@ -133,10 +133,10 @@ fn rejects_missing_environment_variable_without_leaking_placeholder_context() {
         r#"
 version: 1
 storage_dir: /var/lib/galaxync-test
-sync_interval: 5m
 servers:
   - label: community
     url: https://galaxy.ansible.com/api/
+    sync_interval: 5m
     headers:
       Authorization: "Token ${GALAXYNC_TEST_DEFINITELY_MISSING}"
 "#,

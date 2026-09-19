@@ -32,7 +32,7 @@ run config_path="/etc/galaxync/config.yaml":
     cargo run --locked -- --config "{{ config_path }}"
 
 config-validate config_path=config:
-    cargo run --locked -- config validate --config "{{ config_path }}"
+    cargo run --locked -- --config "{{ config_path }}" config validate
 
 container-build image_name=image:
     podman build --pull=newer --tag "{{ image_name }}" --file Dockerfile .

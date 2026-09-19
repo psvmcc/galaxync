@@ -3,7 +3,7 @@
 //! so links are deliberately decoded more liberally than collection data.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -46,7 +46,11 @@ pub enum GalaxyError {
     #[error("Galaxy request failed: {0}")]
     Http(#[from] reqwest::Error),
     #[error("Galaxy returned HTTP {status} for {url}")]
-    Status { status: StatusCode, url: Url },
+    Status {
+        status: StatusCode,
+        url: Url,
+        retry_after: Option<Duration>,
+    },
     #[error("Galaxy response at {url} does not contain a v3 API link")]
     NoV3Api { url: Url },
     #[error("Galaxy response at {url} has an invalid schema: {source}")]
@@ -57,6 +61,8 @@ pub enum GalaxyError {
     },
     #[error("too many redirects while requesting {0}")]
     TooManyRedirects(Url),
+    #[error("Galaxy pagination repeated page URL {0}")]
+    RepeatedPage(Url),
     #[error("concurrency limiter was closed")]
     Closed,
 }
@@ -158,6 +164,56 @@ struct RequestMetricGuard {
     operation: HttpOperation,
     result: HttpResult,
     started: Instant,
+}
+
+pub struct GalaxyResponse {
+    response: Response,
+    _permit: OwnedSemaphorePermit,
+    _metric: Option<RequestMetricGuard>,
+}
+
+impl GalaxyResponse {
+    fn status(&self) -> StatusCode {
+        self.response.status()
+    }
+
+    fn headers(&self) -> &HeaderMap {
+        self.response.headers()
+    }
+
+    async fn bytes(self) -> std::result::Result<bytes::Bytes, reqwest::Error> {
+        let Self {
+            response,
+            _permit,
+            mut _metric,
+        } = self;
+        let result = response.bytes().await;
+        if result.is_err()
+            && let Some(metric) = &mut _metric
+        {
+            metric.result = HttpResult::Error;
+        }
+        result
+    }
+
+    pub fn bytes_stream(
+        self,
+    ) -> impl futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> {
+        let Self {
+            response,
+            _permit,
+            mut _metric,
+        } = self;
+        response.bytes_stream().map(move |item| {
+            if item.is_err()
+                && let Some(metric) = &mut _metric
+            {
+                metric.result = HttpResult::Error;
+            }
+            let _keep_alive = (&_permit, &_metric);
+            item
+        })
+    }
 }
 
 impl Drop for RequestMetricGuard {
@@ -354,10 +410,24 @@ impl GalaxyClient {
 
     /// Open an artifact stream. Sensitive custom headers are included only when
     /// the artifact has the same origin as the configured API server.
-    pub async fn download(&self, url: &str) -> Result<Response> {
+    pub async fn download(&self, url: &str) -> Result<GalaxyResponse> {
         let url = resolve(&self.base_url, url)?;
-        self.request_with_retries_timeout(url, Some(self.download_timeout), HttpOperation::Download)
-            .await
+        let response = self
+            .request_following_redirects(
+                url.clone(),
+                Some(self.download_timeout),
+                HttpOperation::Download,
+            )
+            .await?;
+        if response.status().is_success() {
+            Ok(response)
+        } else {
+            Err(GalaxyError::Status {
+                status: response.status(),
+                url,
+                retry_after: retry_after(response.headers()),
+            })
+        }
     }
 
     async fn paginated<T>(&self, first: Url, operation: HttpOperation) -> Result<Vec<T>>
@@ -366,7 +436,11 @@ impl GalaxyClient {
     {
         let mut result = Vec::new();
         let mut next = Some(first);
+        let mut visited = HashSet::new();
         while let Some(url) = next.take() {
+            if !visited.insert(url.clone()) {
+                return Err(GalaxyError::RepeatedPage(url));
+            }
             let page: Page<T> = self.get_json(url.clone(), operation).await?;
             result.extend(page.data);
             next = page
@@ -384,29 +458,27 @@ impl GalaxyClient {
         url: Url,
         operation: HttpOperation,
     ) -> Result<T> {
-        let response = self.request_with_retries(url.clone(), operation).await?;
-        let bytes = response.bytes().await?;
-        serde_json::from_slice(&bytes).map_err(|source| GalaxyError::Schema { url, source })
-    }
-
-    async fn request_with_retries(&self, url: Url, operation: HttpOperation) -> Result<Response> {
-        self.request_with_retries_timeout(url, None, operation)
-            .await
-    }
-
-    async fn request_with_retries_timeout(
-        &self,
-        url: Url,
-        timeout: Option<Duration>,
-        operation: HttpOperation,
-    ) -> Result<Response> {
         let mut last_error = None;
         for attempt in 0..=self.retry.attempts {
             match self
-                .request_following_redirects(url.clone(), timeout, operation)
+                .request_following_redirects(url.clone(), None, operation)
                 .await
             {
-                Ok(response) if response.status().is_success() => return Ok(response),
+                Ok(response) if response.status().is_success() => match response.bytes().await {
+                    Ok(bytes) => {
+                        return serde_json::from_slice(&bytes)
+                            .map_err(|source| GalaxyError::Schema { url, source });
+                    }
+                    Err(error) => {
+                        let error = GalaxyError::Http(error);
+                        if attempt == self.retry.attempts || !retryable_error(&error) {
+                            return Err(error);
+                        }
+                        last_error = Some(error);
+                        self.record_retry(operation);
+                        self.backoff(attempt, None).await;
+                    }
+                },
                 Ok(response) => {
                     let status = response.status();
                     let retry_after = retry_after(response.headers());
@@ -414,6 +486,7 @@ impl GalaxyClient {
                     let error = GalaxyError::Status {
                         status,
                         url: url.clone(),
+                        retry_after,
                     };
                     if attempt == self.retry.attempts || !retryable_status(status) {
                         return Err(error);
@@ -440,7 +513,7 @@ impl GalaxyClient {
         mut url: Url,
         timeout: Option<Duration>,
         operation: HttpOperation,
-    ) -> Result<Response> {
+    ) -> Result<GalaxyResponse> {
         let original = url.clone();
         for _ in 0..10 {
             let permit = self.permit().await?;
@@ -454,7 +527,7 @@ impl GalaxyClient {
                 request = request.timeout(timeout);
             }
             let response = request.send().await;
-            let mut response = match response {
+            let response = match response {
                 Ok(response) => response,
                 Err(error) => {
                     if let Some((server, metrics)) = &self.telemetry {
@@ -468,27 +541,28 @@ impl GalaxyClient {
                     return Err(error.into());
                 }
             };
-            // Keep the permit with the response so streamed downloads count
-            // against the limit until their body (or response) is dropped.
-            response.extensions_mut().insert(Arc::new(permit));
-            if let Some((server, metrics)) = &self.telemetry {
+            let metric = if let Some((server, metrics)) = &self.telemetry {
                 let result = if response.status().is_success() {
                     HttpResult::Success
                 } else {
                     HttpResult::Error
                 };
-                response
-                    .extensions_mut()
-                    .insert(Arc::new(RequestMetricGuard {
-                        metrics: metrics.clone(),
-                        server: server.clone(),
-                        operation,
-                        result,
-                        started,
-                    }));
-            }
+                Some(RequestMetricGuard {
+                    metrics: metrics.clone(),
+                    server: server.clone(),
+                    operation,
+                    result,
+                    started,
+                })
+            } else {
+                None
+            };
             if !response.status().is_redirection() {
-                return Ok(response);
+                return Ok(GalaxyResponse {
+                    response,
+                    _permit: permit,
+                    _metric: metric,
+                });
             }
             let location = response
                 .headers()
@@ -497,6 +571,7 @@ impl GalaxyClient {
                 .ok_or_else(|| GalaxyError::Status {
                     status: response.status(),
                     url: url.clone(),
+                    retry_after: None,
                 })?;
             url = resolve(&url, location)?;
         }
@@ -525,6 +600,29 @@ impl GalaxyClient {
     fn record_retry(&self, operation: HttpOperation) {
         if let Some((server, metrics)) = &self.telemetry {
             metrics.request_retried(server, operation);
+        }
+    }
+
+    pub(crate) fn record_download_retry(&self) {
+        self.record_retry(HttpOperation::Download);
+    }
+}
+
+impl GalaxyError {
+    pub(crate) fn is_retryable(&self) -> bool {
+        match self {
+            Self::Status { status, .. } => retryable_status(*status),
+            Self::Http(error) => {
+                error.is_timeout() || error.is_connect() || error.is_request() || error.is_body()
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::Status { retry_after, .. } => *retry_after,
+            _ => None,
         }
     }
 }
@@ -615,7 +713,7 @@ fn retryable_status(status: StatusCode) -> bool {
 }
 
 fn retryable_error(error: &GalaxyError) -> bool {
-    matches!(error, GalaxyError::Http(error) if error.is_timeout() || error.is_connect() || error.is_request())
+    error.is_retryable()
 }
 
 fn retry_after(headers: &HeaderMap) -> Option<Duration> {
@@ -679,6 +777,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn supplies_default_user_agent_case_insensitively() {
@@ -761,5 +860,99 @@ mod tests {
         );
         let parsed = retry_after(&headers).unwrap();
         assert!(parsed >= Duration::from_secs(118) && parsed <= Duration::from_secs(120));
+    }
+
+    #[tokio::test]
+    async fn rejects_repeated_pagination_url() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+        let remote = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [],
+                "links": {"next": "/page"}
+            })))
+            .expect(1)
+            .mount(&remote)
+            .await;
+        let client = GalaxyClient::new(
+            Url::parse(&remote.uri()).unwrap(),
+            HeaderMap::new(),
+            1,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            RetryConfig::default(),
+        )
+        .unwrap();
+
+        let error = client
+            .paginated::<serde_json::Value>(
+                Url::parse(&format!("{}/page", remote.uri())).unwrap(),
+                HttpOperation::ListCollections,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, GalaxyError::RepeatedPage(_)));
+    }
+
+    #[tokio::test]
+    async fn retries_interrupted_json_body_within_request_budget() {
+        use axum::{Router, body::Body, response::Response, routing::get};
+
+        let requests = Arc::new(AtomicUsize::new(0));
+        let handler_requests = requests.clone();
+        let app = Router::new().route(
+            "/api/",
+            get(move || {
+                let attempt = handler_requests.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if attempt == 0 {
+                        let body = Body::from_stream(futures::stream::iter([
+                            Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"{")),
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                "truncated response",
+                            )),
+                        ]));
+                        Response::new(body)
+                    } else {
+                        Response::new(Body::from(r#"{"available_versions":{"v3":"/api/v3/"}}"#))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let metrics = Metrics::new();
+        let client = GalaxyClient::new(
+            Url::parse(&format!("http://{address}/api/")).unwrap(),
+            HeaderMap::new(),
+            1,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            RetryConfig {
+                attempts: 1,
+                initial_delay: Duration::from_millis(1),
+                max_delay: Duration::from_millis(1),
+            },
+        )
+        .unwrap()
+        .with_metrics("test", metrics.clone());
+
+        assert_eq!(
+            client.discover_v3().await.unwrap().as_str(),
+            format!("http://{address}/api/v3/")
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert!(
+            metrics
+                .encode()
+                .unwrap()
+                .contains("galaxync_http_retries_total{server=\"test\",operation=\"discovery\"} 1")
+        );
+        server.abort();
     }
 }

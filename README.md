@@ -24,7 +24,7 @@ Local development requires Rust 1.98.1+, Cargo, and [just](https://github.com/ca
 ## Quick start
 
 ```shell
-just config-validate config.example.yaml
+GALAXY_TOKEN=dummy HUB_TOKEN=dummy just config-validate config.example.yaml
 just run ./config.yaml
 just check
 ```
@@ -38,7 +38,6 @@ YAML and TOML use the same schema. Unknown fields are rejected. `${NAME}` values
 ```yaml
 version: 1
 storage_dir: /var/lib/galaxync
-sync_interval: 6h
 run_on_start: true
 overlap_policy: skip
 delete_orphans: false
@@ -60,6 +59,7 @@ servers:
   # Omit namespaces to mirror the complete tree.
   - label: community
     url: https://galaxy.ansible.com/api/
+    sync_interval: 6h
     enabled: true
     concurrency: 8
     include_prerelease: false
@@ -67,6 +67,7 @@ servers:
   # A namespace without collections means all collections in it.
   - label: internal
     url: https://galaxy.example.org/api/
+    sync_interval: 1h
     enabled: true
     concurrency: 4
     headers:
@@ -79,6 +80,7 @@ servers:
   # A namespace with collections selects only those collections.
   - label: curated
     url: https://hub.example.org/api/galaxy/
+    sync_interval: 6h
     enabled: true
     concurrency: 6
     headers:
@@ -102,7 +104,7 @@ Set `include_prerelease: true` to include SemVer versions such as `1.0.0-alpha.1
 Validate a file:
 
 ```shell
-galaxync config validate --config ./config.yaml
+galaxync --config ./config.yaml config validate
 ```
 
 ## Storage layout
@@ -121,7 +123,7 @@ For example:
 The daemon also writes these files inside `storage_dir`:
 
 ```text
-.state.json                 global state and config generation
+.status.json                global state and config generation
 .lock                       single-process lock
 <server.label>/.status.json  machine-readable server status
 <server.label>/.disable     optional runtime disable marker
@@ -148,7 +150,7 @@ An optional text reason can be stored in the marker. Configuration disablement t
 
 ## Scheduling and signals
 
-`run_on_start: true` starts an immediate cycle; otherwise the first cycle waits for `sync_interval`. Cycles for one server never overlap.
+`run_on_start: true` starts an immediate cycle for every server; otherwise each server waits for its own `sync_interval`. Cycles for one server never overlap.
 
 Reload the selected configuration path without restarting:
 
@@ -159,6 +161,8 @@ kill -HUP $(pgrep galaxync)
 The candidate file is fully parsed and validated before activation. An invalid reload keeps the previous configuration. Running cycles retain their original snapshot; the next cycle uses the new generation. Metrics listener changes require restart.
 
 SIGTERM and SIGINT stop new work, wait for active tasks within the shutdown timeout, write state/status, and release the lock. Startup cleans abandoned `.tmp` files and recovers stale `syncing` state.
+
+`.lock` is an advisory process-lock file. Its presence alone does not block startup: the operating system lock held by a running process does. The file may remain after a normal exit or crash and is safely reused by the next process.
 
 ## Prometheus and health
 

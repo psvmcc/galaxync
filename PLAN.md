@@ -23,7 +23,7 @@ Override it with `galaxync --config /path/config.toml`. The effective startup pa
 Validate without starting the daemon:
 
 ```shell
-galaxync config validate --config /etc/galaxync/config.yaml
+galaxync --config /etc/galaxync/config.yaml config validate
 ```
 
 ### YAML example
@@ -31,7 +31,6 @@ galaxync config validate --config /etc/galaxync/config.yaml
 ```yaml
 version: 1
 storage_dir: /var/lib/galaxync
-sync_interval: 6h
 run_on_start: true
 overlap_policy: skip
 delete_orphans: false
@@ -53,6 +52,7 @@ servers:
   # Mirror everything.
   - label: community
     url: https://galaxy.ansible.com/api/
+    sync_interval: 6h
     enabled: true
     concurrency: 8
     include_prerelease: false
@@ -60,6 +60,7 @@ servers:
   # Mirror selected collections from acme and all of community.
   - label: internal
     url: https://galaxy.example.org/api/
+    sync_interval: 1h
     enabled: true
     concurrency: 4
     headers:
@@ -72,6 +73,7 @@ servers:
 
   - label: old-hub
     url: https://old-hub.example.org/api/
+    sync_interval: 12h
     enabled: false
     concurrency: 2
 ```
@@ -81,7 +83,6 @@ servers:
 ```toml
 version = 1
 storage_dir = "/var/lib/galaxync"
-sync_interval = "6h"
 run_on_start = true
 overlap_policy = "skip"
 delete_orphans = false
@@ -102,12 +103,14 @@ path = "/metrics"
 [[servers]]
 label = "community"
 url = "https://galaxy.ansible.com/api/"
+sync_interval = "6h"
 enabled = true
 concurrency = 8
 
 [[servers]]
 label = "internal"
 url = "https://galaxy.example.org/api/"
+sync_interval = "1h"
 enabled = true
 concurrency = 4
 
@@ -208,10 +211,10 @@ After restart, a full reconciliation verifies completed files and redownloads on
 Global state is stored inside the configured storage directory:
 
 ```text
-<storage_dir>/.state.json
+<storage_dir>/.status.json
 ```
 
-It contains format version, config generation/load time, and per-server last-started, completed, successful, status, and statistics fields. It is written via `.state.json.tmp`, fsync, and atomic rename. It is an operational summary, never an integrity cache.
+It contains format version, config generation/load time, and per-server last-started, completed, successful, status, and statistics fields. It is written via `.status.json.tmp`, fsync, and atomic rename. It is an operational summary, never an integrity cache.
 
 Only one process runs per storage directory, enforced by `<storage_dir>/.lock`.
 

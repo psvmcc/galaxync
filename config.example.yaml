@@ -1,11 +1,10 @@
 version: 1
 
-# Root directory for mirrored artifacts. The daemon also stores .state.json
+# Root directory for mirrored artifacts. The daemon also stores .status.json
 # and .lock in this directory.
 storage_dir: /var/lib/galaxync
 
-# Run a reconciliation immediately after startup and then every six hours.
-sync_interval: 6h
+# Run a reconciliation immediately after startup.
 run_on_start: true
 overlap_policy: skip
 
@@ -29,6 +28,7 @@ servers:
   # Omitting namespaces mirrors every namespace, collection, and version.
   - label: community
     url: https://galaxy.ansible.com/api/
+    sync_interval: 6h
     enabled: true
     concurrency: 8
     include_prerelease: false
@@ -36,6 +36,7 @@ servers:
   # Mirror every collection from the listed namespaces.
   - label: organization
     url: https://galaxy.example.org/api/
+    sync_interval: 6h
     enabled: true
     concurrency: 4
     include_prerelease: false
@@ -52,6 +53,7 @@ servers:
   # community. Set enabled: false to disable this server persistently.
   - label: curated
     url: https://hub.example.org/api/galaxy/
+    sync_interval: 6h
     enabled: false
     concurrency: 6
     include_prerelease: false

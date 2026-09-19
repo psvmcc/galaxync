@@ -41,8 +41,6 @@ pub enum ConfigError {
 pub struct Config {
     pub version: u32,
     pub storage_dir: PathBuf,
-    #[serde(with = "duration_serde")]
-    pub sync_interval: Duration,
     #[serde(default = "default_true")]
     pub run_on_start: bool,
     #[serde(default)]
@@ -130,6 +128,8 @@ impl MetricsConfig {
 pub struct ServerConfig {
     pub label: String,
     pub url: String,
+    #[serde(with = "duration_serde")]
+    pub sync_interval: Duration,
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default = "default_concurrency")]
@@ -199,9 +199,6 @@ impl Config {
         if !self.storage_dir.is_absolute() {
             return validation("storage_dir must be absolute");
         }
-        if self.sync_interval.is_zero() {
-            return validation("sync_interval must be greater than zero");
-        }
         if self.delete_orphans {
             return validation(
                 "delete_orphans is not supported yet; keep it false to prevent unsafe deletion",
@@ -241,6 +238,12 @@ impl Config {
             if server.concurrency == 0 {
                 return validation(format!(
                     "server {:?} concurrency must be greater than zero",
+                    server.label
+                ));
+            }
+            if server.sync_interval.is_zero() {
+                return validation(format!(
+                    "server {:?} sync_interval must be greater than zero",
                     server.label
                 ));
             }
@@ -445,16 +448,16 @@ mod tests {
     const YAML: &str = r#"
 version: 1
 storage_dir: /var/lib/galaxync
-sync_interval: 6h
 servers:
   - label: community
     url: https://galaxy.ansible.com/api/
+    sync_interval: 6h
 "#;
 
     #[test]
     fn parses_yaml_with_defaults() {
         let c = Config::parse("config.yaml", YAML).unwrap();
-        assert_eq!(c.sync_interval, Duration::from_secs(21600));
+        assert_eq!(c.servers[0].sync_interval, Duration::from_secs(21600));
         assert!(c.run_on_start && !c.delete_orphans && c.servers[0].enabled);
         assert_eq!(c.servers[0].concurrency, 4);
         assert_eq!(c.servers[0].user_agent(), DEFAULT_USER_AGENT);
@@ -467,10 +470,10 @@ servers:
             r#"
 version = 1
 storage_dir = "/srv/galaxy"
-sync_interval = "10m"
 [[servers]]
 label = "internal"
 url = "https://example.test/api/"
+sync_interval = "10m"
 concurrency = 9
 [servers.headers]
 User-Agent = "custom/1"

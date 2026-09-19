@@ -14,6 +14,7 @@ pub const STATE_FORMAT_VERSION: u32 = 1;
 pub struct GlobalState {
     pub format_version: u32,
     pub config_generation: u64,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub config_loaded_at: Option<OffsetDateTime>,
     pub servers: BTreeMap<String, ServerSummary>,
 }
@@ -32,8 +33,11 @@ impl Default for GlobalState {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerSummary {
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_started_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_completed_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_successful_sync_at: Option<OffsetDateTime>,
     pub last_status: Option<ServerStatus>,
     pub collections_seen: u64,
@@ -60,9 +64,13 @@ pub struct StatusFile {
     pub status: ServerStatus,
     pub run_id: Option<String>,
     pub config_generation: u64,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub started_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub completed_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_successful_sync_at: Option<OffsetDateTime>,
     pub message: Option<String>,
     pub stats: CycleStats,
@@ -224,7 +232,7 @@ mod tests {
     #[tokio::test]
     async fn state_round_trip_and_lifecycle() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".state.json");
+        let path = dir.path().join(".status.json");
         let mut state = GlobalState::default();
         state.config_loaded(3, now());
         state.server_started("community", now());
@@ -240,6 +248,8 @@ mod tests {
             },
         );
         state.save(&path).await.unwrap();
+        let json = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(json.contains("\"last_completed_at\": \"2023-11-14T22:13:30Z\""));
 
         let loaded = GlobalState::load(&path).await.unwrap();
         assert_eq!(loaded.config_generation, 3);
@@ -301,7 +311,7 @@ mod tests {
     #[tokio::test]
     async fn malformed_state_is_not_silently_discarded() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".state.json");
+        let path = dir.path().join(".status.json");
         tokio::fs::write(&path, b"not json").await.unwrap();
         assert!(GlobalState::load(&path).await.is_err());
     }

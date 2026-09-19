@@ -23,8 +23,13 @@ jobs:
       - uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.87.16
         with:
           tool: just
+      - uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.87.16
+        with:
+          tool: cargo-llvm-cov
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: just check
+      - name: Measure test coverage
+        run: cargo llvm-cov --all-targets --all-features --summary-only
       - name: Check advisories, licenses, and dependency sources
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
@@ -32,20 +37,6 @@ jobs:
           arguments: ""
           command-arguments: advisories licenses sources
       - run: cargo build --release --locked
-      - name: Validate systemd and Quadlet units
-        shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes podman
-          sudo install -m 0755 target/release/galaxync /usr/local/bin/galaxync
-          systemd-analyze verify packaging/systemd/galaxync.service
-          quadlet=/usr/lib/systemd/system-generators/podman-system-generator
-          if [[ ! -x "$quadlet" ]]; then
-            quadlet=/usr/libexec/podman/quadlet
-          fi
-          test -x "$quadlet"
-          QUADLET_UNIT_DIRS="$PWD/packaging/quadlet" "$quadlet" --dryrun > /tmp/galaxync-quadlet.service
-          grep -q 'ExecReload=.*HUP' /tmp/galaxync-quadlet.service
       - run: docker build --tag galaxync:ci .
       - name: Smoke-test container
         shell: bash

@@ -13,6 +13,7 @@ categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
 anyhow = "1"
+bytes = "1"
 axum = "0.8"
 clap = { version = "4", features = ["derive"] }
 filetime = "0.2"
