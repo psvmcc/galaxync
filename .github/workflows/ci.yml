@@ -1,0 +1,54 @@
+name: CI
+on:
+  workflow_call:
+  push:
+    branches-ignore: [main]
+  pull_request:
+    branches: ['**']
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    name: Check, test, and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.1
+          components: clippy,rustfmt
+      - uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.87.16
+        with:
+          tool: just
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: just check
+      - name: Check advisories, licenses, and dependency sources
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: ""
+          command-arguments: advisories licenses sources
+      - run: cargo build --release --locked
+      - name: Validate systemd and Quadlet units
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes podman
+          sudo install -m 0755 target/release/galaxync /usr/local/bin/galaxync
+          systemd-analyze verify packaging/systemd/galaxync.service
+          quadlet=/usr/lib/systemd/system-generators/podman-system-generator
+          if [[ ! -x "$quadlet" ]]; then
+            quadlet=/usr/libexec/podman/quadlet
+          fi
+          test -x "$quadlet"
+          QUADLET_UNIT_DIRS="$PWD/packaging/quadlet" "$quadlet" --dryrun > /tmp/galaxync-quadlet.service
+          grep -q 'ExecReload=.*HUP' /tmp/galaxync-quadlet.service
+      - run: docker build --tag galaxync:ci .
+      - name: Smoke-test container
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+          test "$(docker run --rm galaxync:ci --version)" = "galaxync ${version}"

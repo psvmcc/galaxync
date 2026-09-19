@@ -1,0 +1,24 @@
+[Unit]
+Description=Ansible Galaxy collection mirror container
+Documentation=https://github.com/psvmcc/galaxync
+
+[Container]
+Image=ghcr.io/psvmcc/galaxync:latest
+ContainerName=galaxync
+AutoUpdate=registry
+Volume=/etc/galaxync:/etc/galaxync:ro,Z
+Volume=/var/lib/galaxync:/var/lib/galaxync:Z
+PublishPort=127.0.0.1:9898:9898
+Environment=RUST_LOG=info
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=ALL
+ReloadSignal=HUP
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=45s
+
+[Install]
+WantedBy=multi-user.target

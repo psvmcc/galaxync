@@ -1,0 +1,65 @@
+version: 1
+
+# Root directory for mirrored artifacts. The daemon also stores .state.json
+# and .lock in this directory.
+storage_dir: /var/lib/galaxync
+
+# Run a reconciliation immediately after startup and then every six hours.
+sync_interval: 6h
+run_on_start: true
+overlap_policy: skip
+
+# Keep local artifacts that are no longer present upstream.
+delete_orphans: false
+
+http:
+  connect_timeout: 10s
+  request_timeout: 60s
+  download_timeout: 30m
+  retry_attempts: 5
+  retry_initial_delay: 1s
+  retry_max_delay: 30s
+
+metrics:
+  enabled: true
+  listen: 0.0.0.0:9898
+  path: /metrics
+
+servers:
+  # Omitting namespaces mirrors every namespace, collection, and version.
+  - label: community
+    url: https://galaxy.ansible.com/api/
+    enabled: true
+    concurrency: 8
+    include_prerelease: false
+
+  # Mirror every collection from the listed namespaces.
+  - label: organization
+    url: https://galaxy.example.org/api/
+    enabled: true
+    concurrency: 4
+    include_prerelease: false
+    headers:
+      Authorization: "Token ${GALAXY_TOKEN}"
+      X-Organization-ID: "42"
+      # If omitted, galaxync supplies an ansible-galaxy-compatible User-Agent.
+      User-Agent: "organization-galaxy-mirror/1.0"
+    namespaces:
+      - name: platform
+      - name: operations
+
+  # Mirror only selected collections from acme, and all collections from
+  # community. Set enabled: false to disable this server persistently.
+  - label: curated
+    url: https://hub.example.org/api/galaxy/
+    enabled: false
+    concurrency: 6
+    include_prerelease: false
+    headers:
+      Authorization: "Token ${HUB_TOKEN}"
+    namespaces:
+      - name: acme
+        collections:
+          - system
+          - network
+      - name: community
